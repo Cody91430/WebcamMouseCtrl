@@ -75,6 +75,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--camera-index", type=int, default=0, help="Index of the webcam (0 default)")
     parser.add_argument("--width", type=int, default=640, help="Requested capture width")
     parser.add_argument("--height", type=int, default=480, help="Requested capture height")
+    parser.add_argument("--max-hands", type=int, default=2, help="Maximum number of hands to track (lower = faster)")
+    parser.add_argument("--model-complexity", type=int, default=0, choices=[0, 1], help="MediaPipe Hands model complexity (0 = faster)")
+    parser.add_argument(
+        "--inference-scale",
+        type=float,
+        default=0.7,
+        help="Downscale factor applied before running MediaPipe (0.5-0.8 recommended for FPS gain)",
+    )
     parser.add_argument("--no-mirror", action="store_true", help="Disable horizontal flip of the webcam preview")
     parser.add_argument("--show-fps", action="store_true", help="Overlay FPS counter")
     parser.add_argument("--min-cutoff", type=float, default=1.2, help="One Euro min cutoff")
@@ -161,6 +169,8 @@ def draw_hud(frame, observations: List[HandObservation], cursors: Dict[str, Tupl
 def main() -> int:
     args = parse_args()
 
+    cv2.setUseOptimized(True)
+
     try:
         cap = open_camera(args.camera_index, args.width, args.height)
     except Exception as exc:  # noqa: BLE001
@@ -168,8 +178,8 @@ def main() -> int:
         return 1
 
     hands = mp.solutions.hands.Hands(
-        max_num_hands=2,
-        model_complexity=1,
+        max_num_hands=args.max_hands,
+        model_complexity=args.model_complexity,
         min_detection_confidence=0.6,
         min_tracking_confidence=0.6,
     )
@@ -190,13 +200,19 @@ def main() -> int:
             if not args.no_mirror:
                 frame = cv2.flip(frame, 1)
 
+            proc_frame = frame
+            if 0.05 < args.inference_scale < 0.999:
+                new_w = max(1, int(frame.shape[1] * args.inference_scale))
+                new_h = max(1, int(frame.shape[0] * args.inference_scale))
+                proc_frame = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
             now = time.time()
             dt = now - prev_ts
             prev_ts = now
             if dt > 0:
                 fps = 0.9 * fps + 0.1 * (1.0 / dt) if fps > 0 else 1.0 / dt
 
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            rgb = cv2.cvtColor(proc_frame, cv2.COLOR_BGR2RGB)
             result = hands.process(rgb)
             observations = extract_hand_observations(result)
             cursor_norms.clear()

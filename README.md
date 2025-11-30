@@ -28,6 +28,9 @@ Options utiles:
 - `--camera-index`: index de la webcam (0 par defaut).
 - `--width` / `--height`: resolution demandee.
 - `--show-fps`: overlay FPS.
+- `--inference-scale`: downscale avant inference (ex: 0.6 pour gagner des FPS, 1.0 pour desactiver).
+- `--model-complexity`: 0 pour la version rapide (defaut), 1 pour legerement plus precis.
+- `--max-hands`: limiter le nombre de mains suivies (1 ou 2).
 - `--no-mirror`: desactive le flip horizontal du flux.
 - `--min-cutoff`, `--beta`, `--d-cutoff`: reglages du filtre One Euro.
 
