@@ -31,8 +31,16 @@ Options utiles:
 - `--inference-scale`: downscale avant inference (ex: 0.6 pour gagner des FPS, 1.0 pour desactiver).
 - `--model-complexity`: 0 pour la version rapide (defaut), 1 pour legerement plus precis.
 - `--max-hands`: limiter le nombre de mains suivies (1 ou 2).
+- `--no-draw-hands`: coupe l'affichage des landmarks/bbox pour gagner des FPS.
+- `--process-every`: lance l'inference toutes les N images (ex: 2 ou 3) pour soulager le CPU et stabiliser le FPS.
 - `--no-mirror`: desactive le flip horizontal du flux.
 - `--min-cutoff`, `--beta`, `--d-cutoff`: reglages du filtre One Euro.
+
+HUD: ESC pour quitter, FPS (si active), compteur de clics, couleur verte/rouge sur le curseur quand pinch detecte.
+
+## Controle du curseur (couplage)
+- `--control-cursor`: utilise le module `cursor_control.py` pour deplacer le curseur avec la main la mieux detectee.
+- `cursor_control.py`: module autonome; peut aussi etre importe ailleurs si besoin.
 
 Quitter: touche ESC dans la fenetre.
 

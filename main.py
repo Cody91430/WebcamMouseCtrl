@@ -16,6 +16,19 @@ from typing import Dict, List, Optional, Tuple
 import cv2
 import mediapipe as mp
 
+try:
+    import pyautogui
+
+    pyautogui.FAILSAFE = False
+except Exception:  # noqa: BLE001
+    pyautogui = None
+
+try:
+    from cursor_control import CursorController
+except Exception:
+    CursorController = None  # type: ignore
+
+PINCH_RELEASE_DELAY = 0.25  # seconds of tolerance before considering pinch released
 
 def clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
@@ -83,6 +96,18 @@ def parse_args() -> argparse.Namespace:
         default=0.7,
         help="Downscale factor applied before running MediaPipe (0.5-0.8 recommended for FPS gain)",
     )
+    parser.add_argument("--no-draw-hands", action="store_true", help="Disable drawing landmarks/bboxes to save FPS")
+    parser.add_argument(
+        "--control-cursor",
+        action="store_true",
+        help="Move the OS cursor with the highest-score hand index tip (requires pyautogui)",
+    )
+    parser.add_argument(
+        "--process-every",
+        type=int,
+        default=1,
+        help="Run hand inference every Nth frame to save CPU (1 = every frame)",
+    )
     parser.add_argument("--no-mirror", action="store_true", help="Disable horizontal flip of the webcam preview")
     parser.add_argument("--show-fps", action="store_true", help="Overlay FPS counter")
     parser.add_argument("--min-cutoff", type=float, default=1.2, help="One Euro min cutoff")
@@ -136,34 +161,34 @@ def extract_hand_observations(result) -> List[HandObservation]:
     return observations
 
 
-def draw_hud(frame, observations: List[HandObservation], cursors: Dict[str, Tuple[float, float]], fps: float) -> None:
+def draw_hud(
+    frame,
+    observations: List[HandObservation],
+    cursors: Dict[str, Tuple[float, float]],
+    fps: float,
+    pinch_states: Dict[str, bool],
+    render_hands: bool,
+) -> None:
     h, w = frame.shape[:2]
     overlay = "ESC quit"
     if fps > 0:
         overlay = f"{overlay} | FPS {fps:0.1f}"
     cv2.putText(frame, overlay, (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2, cv2.LINE_AA)
 
-    for obs in observations:
-        min_x, min_y, max_x, max_y = obs.bbox
-        x0, y0 = int(min_x * w), int(min_y * h)
-        x1, y1 = int(max_x * w), int(max_y * h)
-        cv2.rectangle(frame, (x0, y0), (x1, y1), (0, 200, 255), 2)
+    if render_hands:
+        line_spec = mp.solutions.drawing_utils.DrawingSpec(color=(0, 255, 0), thickness=1, circle_radius=1)
+        for obs in observations:
+            label = f"{obs.handedness} {obs.score:0.2f}"
+            cv2.putText(frame, label, (12, 52), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2, cv2.LINE_AA)
+            mp.solutions.drawing_utils.draw_landmarks(
+                frame,
+                obs.raw_landmarks,
+                mp.solutions.hands.HAND_CONNECTIONS,
+                line_spec,
+                line_spec,
+            )
 
-        label = f"{obs.handedness} {obs.score:0.2f}"
-        cv2.putText(frame, label, (x0 + 4, max(y0 - 8, 16)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2, cv2.LINE_AA)
-
-        mp.solutions.drawing_utils.draw_landmarks(
-            frame,
-            obs.raw_landmarks,
-            mp.solutions.hands.HAND_CONNECTIONS,
-            mp.solutions.drawing_styles.get_default_hand_landmarks_style(),
-            mp.solutions.drawing_styles.get_default_hand_connections_style(),
-        )
-
-    for hand_id, pos in cursors.items():
-        cx, cy = int(pos[0] * w), int(pos[1] * h)
-        cv2.drawMarker(frame, (cx, cy), (0, 255, 0), markerType=cv2.MARKER_CROSS, markerSize=20, thickness=2)
-        cv2.putText(frame, hand_id, (cx + 6, cy - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2, cv2.LINE_AA)
+    # Removed cursor markers and labels for a minimal HUD.
 
 
 def main() -> int:
@@ -184,14 +209,29 @@ def main() -> int:
         min_tracking_confidence=0.6,
     )
 
+    cursor_controller = None
+    if args.control_cursor:
+        if CursorController is None or pyautogui is None:
+            print("[warn] Cursor control requested but pyautogui/cursor_control not available; ignoring.")
+        else:
+            cursor_controller = CursorController()
+
     prev_ts = time.time()
     fps = 0.0
     cursor_norms: Dict[str, Tuple[float, float]] = {}
     x_filters: Dict[str, OneEuroFilter] = {}
     y_filters: Dict[str, OneEuroFilter] = {}
+    pinch_states: Dict[str, bool] = {}
+    pinch_off_started: Dict[str, Optional[float]] = {}
+    warned_no_click = False
+    frame_idx = 0
+    last_observations: List[HandObservation] = []
+    last_cursor_norms: Dict[str, Tuple[float, float]] = {}
 
     try:
+        process_every = max(1, args.process_every)
         while True:
+            frame_idx += 1
             ok, frame = cap.read()
             if not ok:
                 print("[warn] Failed to read frame from camera; exiting")
@@ -200,38 +240,103 @@ def main() -> int:
             if not args.no_mirror:
                 frame = cv2.flip(frame, 1)
 
-            proc_frame = frame
-            if 0.05 < args.inference_scale < 0.999:
-                new_w = max(1, int(frame.shape[1] * args.inference_scale))
-                new_h = max(1, int(frame.shape[0] * args.inference_scale))
-                proc_frame = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
-
             now = time.time()
             dt = now - prev_ts
             prev_ts = now
             if dt > 0:
                 fps = 0.9 * fps + 0.1 * (1.0 / dt) if fps > 0 else 1.0 / dt
 
-            rgb = cv2.cvtColor(proc_frame, cv2.COLOR_BGR2RGB)
-            result = hands.process(rgb)
-            observations = extract_hand_observations(result)
-            cursor_norms.clear()
+            if cursor_controller is not None and fps > 0:
+                # Tie cursor update rate to current FPS, allow higher ceiling for snappier motion.
+                cursor_controller.settings.max_rate_hz = max(20.0, min(fps, 240.0))
 
+            should_process = frame_idx % process_every == 0
             h, w = frame.shape[:2]
-            for idx, obs in enumerate(observations):
-                hand_id = f"{obs.handedness or 'Hand'}-{idx}"
-                if hand_id not in x_filters:
-                    x_filters[hand_id] = OneEuroFilter(min_cutoff=args.min_cutoff, beta=args.beta, d_cutoff=args.d_cutoff)
-                    y_filters[hand_id] = OneEuroFilter(min_cutoff=args.min_cutoff, beta=args.beta, d_cutoff=args.d_cutoff)
 
-                norm_x, norm_y = obs.index_tip
-                target_x = x_filters[hand_id](norm_x * w, now)
-                target_y = y_filters[hand_id](norm_y * h, now)
-                target_x = clamp(target_x, 0, w - 1)
-                target_y = clamp(target_y, 0, h - 1)
-                cursor_norms[hand_id] = (target_x / w, target_y / h)
+            if should_process:
+                proc_frame = frame
+                if 0.05 < args.inference_scale < 0.999:
+                    new_w = max(1, int(frame.shape[1] * args.inference_scale))
+                    new_h = max(1, int(frame.shape[0] * args.inference_scale))
+                    proc_frame = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
-            draw_hud(frame, observations, cursor_norms, fps if args.show_fps else 0.0)
+                rgb = cv2.cvtColor(proc_frame, cv2.COLOR_BGR2RGB)
+                result = hands.process(rgb)
+                observations = extract_hand_observations(result)
+                cursor_norms = {}
+                new_pinch_states: Dict[str, bool] = {}
+
+                for idx, obs in enumerate(observations):
+                    hand_id = f"{obs.handedness or 'Hand'}-{idx}"
+                    if hand_id not in x_filters:
+                        x_filters[hand_id] = OneEuroFilter(min_cutoff=args.min_cutoff, beta=args.beta, d_cutoff=args.d_cutoff)
+                        y_filters[hand_id] = OneEuroFilter(min_cutoff=args.min_cutoff, beta=args.beta, d_cutoff=args.d_cutoff)
+
+                    norm_x, norm_y = obs.index_tip
+                    target_x = x_filters[hand_id](norm_x * w, now)
+                    target_y = y_filters[hand_id](norm_y * h, now)
+                    target_x = clamp(target_x, 0, w - 1)
+                    target_y = clamp(target_y, 0, h - 1)
+                    cursor_norms[hand_id] = (target_x / w, target_y / h)
+
+                    thumb_tip = obs.landmarks[4]
+                    index_tip = obs.landmarks[8]
+                    pinch_dist = math.hypot(thumb_tip[0] - index_tip[0], thumb_tip[1] - index_tip[1])
+                    span = math.hypot(obs.bbox[2] - obs.bbox[0], obs.bbox[3] - obs.bbox[1])
+                    span = span if span > 1e-6 else 1.0
+                    pinch_ratio = pinch_dist / span
+
+                    prev_state = pinch_states.get(hand_id, False)
+                    pinch_on = pinch_ratio < 0.17
+                    pinch_off = pinch_ratio > 0.24
+
+                    if prev_state:
+                        if pinch_off:
+                            start = pinch_off_started.get(hand_id)
+                            if start is None:
+                                pinch_off_started[hand_id] = now
+                                new_pinch_states[hand_id] = True
+                            elif now - start >= PINCH_RELEASE_DELAY:
+                                new_pinch_states[hand_id] = False
+                            else:
+                                new_pinch_states[hand_id] = True
+                        else:
+                            pinch_off_started[hand_id] = None
+                            new_pinch_states[hand_id] = True
+                    else:
+                        if pinch_on:
+                            pinch_off_started[hand_id] = None
+                            new_pinch_states[hand_id] = True
+                        else:
+                            pinch_off_started[hand_id] = None
+                            new_pinch_states[hand_id] = False
+
+                pinch_states = new_pinch_states
+                pinch_off_started = {k: v for k, v in pinch_off_started.items() if k in pinch_states}
+                last_observations = observations
+                last_cursor_norms = cursor_norms
+            else:
+                observations = last_observations
+                cursor_norms = last_cursor_norms
+
+            if cursor_controller is not None and observations and should_process:
+                # Only drive the cursor with the right hand index tip.
+                right_indices = [i for i, obs in enumerate(observations) if obs.handedness.lower() == "right"]
+                if right_indices:
+                    best_idx = max(right_indices, key=lambda i: observations[i].score)
+                    best_id = f"{observations[best_idx].handedness or 'Hand'}-{best_idx}"
+                    pos = cursor_norms.get(best_id)
+                    if pos:
+                        cursor_controller.move_normalized(pos[0], pos[1])
+
+            draw_hud(
+                frame,
+                observations,
+                cursor_norms,
+                fps if args.show_fps else 0.0,
+                pinch_states,
+                not args.no_draw_hands,
+            )
             cv2.imshow("WebcamMouseCtrl", frame)
 
             key = cv2.waitKey(1) & 0xFF
