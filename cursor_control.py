@@ -80,6 +80,7 @@ class CursorController:
                 w = _user32.GetSystemMetrics(0)
                 h = _user32.GetSystemMetrics(1)
                 return int(w), int(h)
+            except Exception:
                 pass
         if self._backend == "pyautogui" and pyautogui is not None:
             try:

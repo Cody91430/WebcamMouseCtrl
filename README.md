@@ -15,7 +15,7 @@ pip install -r requirements.txt
 
 Si l'activation est bloquee (execution policy), lancer:
 ```powershell
-Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force
+Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -ForceASWKP
 .\.venv\Scripts\Activate.ps1
 ```
 
