@@ -34,7 +34,11 @@ class CursorSettings:
 
     max_rate_hz: float = 240.0  # 0 for unlimited
     smooth: bool = True
-    smooth_alpha: float = 0.5   # higher = more reactive
+    smooth_alpha: float = 0.5   # fallback alpha when dynamic_smoothing is False
+    dynamic_smoothing: bool = True  # adapt smoothing based on hand speed (trackpad-like)
+    alpha_slow: float = 0.08    # alpha when moving slowly (smoother, more precise)
+    alpha_fast: float = 0.75    # alpha when moving fast (more reactive)
+    speed_ref_px: float = 1400.0  # px/s at which alpha approaches alpha_fast
     min_move_px: float = 0.2    # ignore tiny moves to cut jitter
     max_step_px: float = 0.0    # 0 to allow full jumps (faster travel)
     backend: str = "auto"      # "win32", "pyautogui", or "auto"
@@ -49,6 +53,9 @@ class CursorController:
         self._last_move_ts: float = 0.0
         self._smooth_x: Optional[float] = None
         self._smooth_y: Optional[float] = None
+        self._last_raw_x: Optional[float] = None
+        self._last_raw_y: Optional[float] = None
+        self._last_raw_ts: float = 0.0
         self._last_sent: Optional[Tuple[float, float]] = None
         self._backend = self._choose_backend()
 
@@ -73,7 +80,6 @@ class CursorController:
                 w = _user32.GetSystemMetrics(0)
                 h = _user32.GetSystemMetrics(1)
                 return int(w), int(h)
-            except Exception:
                 pass
         if self._backend == "pyautogui" and pyautogui is not None:
             try:
@@ -111,9 +117,28 @@ class CursorController:
             if self._smooth_x is None:
                 self._smooth_x, self._smooth_y = sx, sy
             else:
-                a = self.settings.smooth_alpha
+                # Dynamic smoothing: more smoothing for small, slow moves (precision),
+                # less smoothing for fast moves (speed), similar to a trackpad feel.
+                if self.settings.dynamic_smoothing:
+                    now = time.time()
+                    dt_raw = now - self._last_raw_ts if self._last_raw_ts > 0 else 0.0
+                    dx_raw = sx - (self._last_raw_x if self._last_raw_x is not None else sx)
+                    dy_raw = sy - (self._last_raw_y if self._last_raw_y is not None else sy)
+                    speed = (dx_raw * dx_raw + dy_raw * dy_raw) ** 0.5
+                    if dt_raw > 1e-3:
+                        speed /= dt_raw  # px/s
+                    if self.settings.speed_ref_px > 0:
+                        s = min(speed / self.settings.speed_ref_px, 1.0)
+                    else:
+                        s = 1.0
+                    a = self.settings.alpha_slow + (self.settings.alpha_fast - self.settings.alpha_slow) * s
+                else:
+                    a = self.settings.smooth_alpha
+                a = max(0.0, min(1.0, a))
                 self._smooth_x = a * sx + (1 - a) * self._smooth_x
                 self._smooth_y = a * sy + (1 - a) * self._smooth_y
+            self._last_raw_x, self._last_raw_y = sx, sy
+            self._last_raw_ts = time.time()
             sx, sy = self._smooth_x, self._smooth_y
 
         now = time.time()

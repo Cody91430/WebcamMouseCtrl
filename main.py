@@ -222,8 +222,12 @@ def main() -> int:
     x_filters: Dict[str, OneEuroFilter] = {}
     y_filters: Dict[str, OneEuroFilter] = {}
     pinch_states: Dict[str, bool] = {}
+    pinch_middle_states: Dict[str, bool] = {}
     pinch_off_started: Dict[str, Optional[float]] = {}
+    pinch_middle_off_started: Dict[str, Optional[float]] = {}
     warned_no_click = False
+    prev_pinch_states: Dict[str, bool] = {}
+    prev_pinch_middle_states: Dict[str, bool] = {}
     frame_idx = 0
     last_observations: List[HandObservation] = []
     last_cursor_norms: Dict[str, Tuple[float, float]] = {}
@@ -265,6 +269,7 @@ def main() -> int:
                 observations = extract_hand_observations(result)
                 cursor_norms = {}
                 new_pinch_states: Dict[str, bool] = {}
+                new_pinch_middle_states: Dict[str, bool] = {}
 
                 for idx, obs in enumerate(observations):
                     hand_id = f"{obs.handedness or 'Hand'}-{idx}"
@@ -281,14 +286,20 @@ def main() -> int:
 
                     thumb_tip = obs.landmarks[4]
                     index_tip = obs.landmarks[8]
+                    middle_tip = obs.landmarks[12]
                     pinch_dist = math.hypot(thumb_tip[0] - index_tip[0], thumb_tip[1] - index_tip[1])
+                    pinch_dist_mid = math.hypot(thumb_tip[0] - middle_tip[0], thumb_tip[1] - middle_tip[1])
                     span = math.hypot(obs.bbox[2] - obs.bbox[0], obs.bbox[3] - obs.bbox[1])
                     span = span if span > 1e-6 else 1.0
                     pinch_ratio = pinch_dist / span
+                    pinch_ratio_mid = pinch_dist_mid / span
 
                     prev_state = pinch_states.get(hand_id, False)
+                    prev_state_mid = pinch_middle_states.get(hand_id, False)
                     pinch_on = pinch_ratio < 0.17
                     pinch_off = pinch_ratio > 0.24
+                    pinch_on_mid = pinch_ratio_mid < 0.17
+                    pinch_off_mid = pinch_ratio_mid > 0.24
 
                     if prev_state:
                         if pinch_off:
@@ -310,9 +321,53 @@ def main() -> int:
                         else:
                             pinch_off_started[hand_id] = None
                             new_pinch_states[hand_id] = False
+                    if prev_state_mid:
+                        if pinch_off_mid:
+                            start = pinch_middle_off_started.get(hand_id)
+                            if start is None:
+                                pinch_middle_off_started[hand_id] = now
+                                new_pinch_middle_states[hand_id] = True
+                            elif now - start >= PINCH_RELEASE_DELAY:
+                                new_pinch_middle_states[hand_id] = False
+                            else:
+                                new_pinch_middle_states[hand_id] = True
+                        else:
+                            pinch_middle_off_started[hand_id] = None
+                            new_pinch_middle_states[hand_id] = True
+                    else:
+                        if pinch_on_mid:
+                            pinch_middle_off_started[hand_id] = None
+                            new_pinch_middle_states[hand_id] = True
+                        else:
+                            pinch_middle_off_started[hand_id] = None
+                            new_pinch_middle_states[hand_id] = False
 
                 pinch_states = new_pinch_states
+                pinch_middle_states = new_pinch_middle_states
                 pinch_off_started = {k: v for k, v in pinch_off_started.items() if k in pinch_states}
+                pinch_middle_off_started = {k: v for k, v in pinch_middle_off_started.items() if k in pinch_middle_states}
+
+                # Left-hand pinch -> left click on rising edge.
+                if pyautogui is not None:
+                    for hand_id, state in pinch_states.items():
+                        if hand_id.lower().startswith("left") and state and not prev_pinch_states.get(hand_id, False):
+                            try:
+                                pyautogui.click(button="left")
+                            except Exception:
+                                pass
+                    # Left-hand middle pinch -> right click on rising edge.
+                    for hand_id, state in pinch_middle_states.items():
+                        if hand_id.lower().startswith("left") and state and not prev_pinch_middle_states.get(hand_id, False):
+                            try:
+                                pyautogui.click(button="right")
+                            except Exception:
+                                pass
+                elif not warned_no_click:
+                    print("[warn] pyautogui not available; pinch click disabled.")
+                    warned_no_click = True
+
+                prev_pinch_states = pinch_states.copy()
+                prev_pinch_middle_states = pinch_middle_states.copy()
                 last_observations = observations
                 last_cursor_norms = cursor_norms
             else:
